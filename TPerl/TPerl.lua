@@ -651,46 +651,40 @@ end
 
 -- Heuristic fallback for Bloodlust-style lockouts when IDs are hidden/secret in combat.
 -- This is only used under "Solo curables" to prevent false highlights.
+local BlockedLockoutIcons = {
+	[136149] = true, -- Desplazamiento temporal (Time Warp)
+	[136012] = true, -- Saciado (Bloodlust / Ansia de sangre)
+	[135999] = true, -- Agotamiento (Heroism / Heroísmo)
+	[135964] = true, -- Abstinencia (Forbearance)
+	[458224] = true, -- Desplazamiento temporal (Variante/Icono custom)
+	[136086] = true, -- Fatigado (Tambores antiguos)
+	[1005694] = true, -- Fatigado (Tambores de Furia)
+	[2065632] = true, -- Fatigado (Tambores Shadowlands)
+	[3528224] = true, -- Fatigado (Tambores Dragonflight/The War Within)
+}
+
 function TPerl_IsSoloCurablesLockoutHeuristic(auraData)
 	if (type(auraData) ~= "table") then
 		return false
 	end
-	local dur = TPerl_SafeTableGet(auraData, "duration")
+	
 	local icon = TPerl_SafeTableGet(auraData, "icon")
-
-	-- Fast icon-only matches (works even when duration becomes hidden/secret in combat).
-	-- These icons are strongly associated with non-dispellable lockouts that should never highlight under "Solo curables".
-	local okTD, isTDIcon = pcall(rawequal, icon, 458224) -- Temporal Displacement icon (per /dump)
-	if (okTD and isTDIcon) then
-		return true
-	end
-	local okForb, isForbIcon = pcall(rawequal, icon, 135964) -- Forbearance icon (common)
-	if (okForb and isForbIcon) then
-		return true
-	end
-
-	-- Temporal Displacement / Bloodlust lockouts are typically 600s.
-	local okD600, is600 = pcall(rawequal, dur, 600)
-	if (okD600 and is600) then
-		local okI1, isTD = pcall(rawequal, icon, 458224) -- Temporal Displacement icon (per /dump)
-		if (okI1 and isTD) then
-			return true
-		end
-		local okI2, isLust = pcall(rawequal, icon, 136012) -- Bloodlust/Heroism icon (common)
-		if (okI2 and isLust) then
+	-- ¡AQUÍ ESTÁ LA MAGIA! Comprobamos TPerl_CanAccess(icon) para evitar el error LUA
+	if (icon ~= nil and TPerl_CanAccess(icon)) then
+		local ok, iconVal = pcall(tonumber, icon)
+		if (ok and iconVal and BlockedLockoutIcons[iconVal]) then
 			return true
 		end
 	end
 
-	-- Forbearance is commonly 30s.
-	local okD30, is30 = pcall(rawequal, dur, 30)
-	if (okD30 and is30) then
-		local okIF, isForb = pcall(rawequal, icon, 135964) -- Forbearance icon (common)
-		if (okIF and isForb) then
+	local dur = TPerl_SafeTableGet(auraData, "duration")
+	if (dur ~= nil and TPerl_CanAccess(dur)) then
+		local okD600, is600 = pcall(rawequal, dur, 600)
+		if (okD600 and is600) then
 			return true
 		end
 	end
-
+	
 	return false
 end
 
