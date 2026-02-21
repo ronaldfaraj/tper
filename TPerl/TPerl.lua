@@ -718,14 +718,28 @@ function TPerl_GetAuraSpellIdFromTooltip(unit, index)
 	return nil
 end
 
+TPerl_BlockedAuraInstanceIDs = TPerl_BlockedAuraInstanceIDs or {}
+
+TPerl_BlockedAuraInstanceIDs = TPerl_BlockedAuraInstanceIDs or {}
+
 function TPerl_IsSoloCurablesBlockedAura(unit, auraData, auraIndex)
 	if (type(auraData) ~= "table") then
 		return false
 	end
 
-	local sid = TPerl_TryResolveAuraSpellId(unit, auraData, auraIndex)
-	if (TPerl_IsSoloCurablesBlockedSpellId(sid)) then
+	local auraId = TPerl_SafeTableGet(auraData, "auraInstanceID") or TPerl_SafeTableGet(auraData, "auraInstanceId")
+	local safeAuraKey = TPerl_SafeAuraIdKey(auraId)
+	
+	-- Si ya confirmamos antes que era un lockout, lo bloqueamos para siempre en este combate
+	if safeAuraKey and TPerl_BlockedAuraInstanceIDs[safeAuraKey] then
 		return true
+	end
+
+	local isBlocked = false
+	local sid = TPerl_TryResolveAuraSpellId(unit, auraData, auraIndex)
+	
+	if (TPerl_IsSoloCurablesBlockedSpellId(sid)) then
+		isBlocked = true
 	end
 
 	local function CheckNameSafe(n)
@@ -742,25 +756,32 @@ function TPerl_IsSoloCurablesBlockedAura(unit, auraData, auraIndex)
 		return false
 	end
 
-	if (sid ~= nil) then
+	if not isBlocked and (sid ~= nil) then
 		local getter = GetSpellInfo
 		if (not getter and C_Spell and C_Spell.GetSpellName) then
 			getter = C_Spell.GetSpellName
 		end
 		if (getter) then
 			local okN, sname = pcall(getter, sid)
-			if (okN and CheckNameSafe(sname)) then return true end
+			if (okN and CheckNameSafe(sname)) then isBlocked = true end
 		end
 	end
 
-	local nm = TPerl_SafeTableGet(auraData, "name")
-	if (CheckNameSafe(nm)) then return true end
-
-	if (TPerl_IsSoloCurablesLockoutHeuristic(auraData)) then
-		return true
+	if not isBlocked then
+		local nm = TPerl_SafeTableGet(auraData, "name")
+		if (CheckNameSafe(nm)) then isBlocked = true end
 	end
 
-	return false
+	if not isBlocked and (TPerl_IsSoloCurablesLockoutHeuristic(auraData)) then
+		isBlocked = true
+	end
+
+	-- Guardamos en caché para que NO vuelva a saltar a los 5 segundos
+	if isBlocked and safeAuraKey then
+		TPerl_BlockedAuraInstanceIDs[safeAuraKey] = true
+	end
+
+	return isBlocked
 end
 
 function TPerl_SafeCanActivePlayerDispel(auraData)
@@ -822,8 +843,8 @@ function TPerl_GetDebuffColorByAuraData(unit, auraData, curve, curableOnly, aura
 	local spellId = TPerl_SafeTableGet(auraData, "spellId") or TPerl_SafeTableGet(auraData, "spellID")
 	local name = TPerl_SafeTableGet(auraData, "name")
 
-	-- "Solo curables" must not highlight non-dispellable lockouts (Bloodlust/Forbearance).
-	if (curableOnly and TPerl_IsSoloCurablesBlockedAura(unit, auraData, auraIndex)) then
+	-- BLOQUEO FORZADO: Siempre ignorar lockouts independientemente de la configuración
+	if (TPerl_IsSoloCurablesBlockedAura(unit, auraData, auraIndex)) then
 		return nil
 	end
 
@@ -832,98 +853,103 @@ function TPerl_GetDebuffColorByAuraData(unit, auraData, curve, curableOnly, aura
 	end
 
 	local dt
-	-- 1) AuraData dispelName when accessible
+	local dtIsCertain = false
+
+	-- 1) AuraData dispelName cuando es accesible
 	local dispelName = TPerl_SafeTableGet(auraData, "dispelName")
-	if (dispelName and TPerl_CanAccess(dispelName)) then
+	if (TPerl_CanAccess(dispelName)) then
+		dtIsCertain = true
 		local ndt = TPerl_NormalizeDispelType(dispelName)
 		if (isTyped(ndt)) then
 			dt = ndt
+		else
+			dt = "none"
 		end
 	end
 
-	-- 2) UnitDebuff (legacy) is often reliable for dispel type across clients
-	if (not dt and unit and auraIndex and UnitDebuff) then
+	-- 2) Legacy UnitDebuff (suele ser fiable entre clientes)
+	if (not dtIsCertain and unit and auraIndex and UnitDebuff) then
 		local ok, _, _, _, debuffType = pcall(UnitDebuff, unit, auraIndex)
-		if (ok and debuffType and TPerl_CanAccess(debuffType)) then
+		if (ok and TPerl_CanAccess(debuffType)) then
+			dtIsCertain = true
 			local ndt = TPerl_NormalizeDispelType(debuffType)
 			if (isTyped(ndt)) then
 				dt = ndt
+			else
+				dt = "none"
 			end
 		end
 	end
 
-	-- If we can determine the dispel type textually, return the safe numeric colour mapping.
-	if (dt) then
+	local auraKey = TPerl_SafeAuraIdKey(auraId)
+	local spellKey = TPerl_SafeSpellIdKey(spellId)
+
+	-- Guardamos en caché INMEDIATAMENTE si sabemos el tipo con seguridad
+	if (dtIsCertain) then
+		if (auraKey) then TPerl_SetCachedDispelTypeByAuraId(auraKey, dt) end
+		if (spellKey) then TPerl_SetCachedDispelType(spellKey, dt, name) end
+	end
+
+	-- 3) Consultar caché si NO estamos seguros (ej. en combate tras 5s cuando se oculta)
+	if (not dtIsCertain) then
+		if (auraKey) then
+			local cdt = TPerl_GetCachedDispelTypeByAuraId(auraKey)
+			if (cdt) then
+				dt = cdt
+				dtIsCertain = true
+			end
+		end
+		if (not dtIsCertain and spellKey) then
+			local cdt = TPerl_GetCachedDispelType(spellKey)
+			if (cdt) then
+				dt = cdt
+				dtIsCertain = true
+			end
+		end
+	end
+
+	-- ¡EL ARREGLO ESTRELLA!
+	-- Si sabemos con seguridad que no es mágico/curable (dt == "none"), devolvemos nil inmediatamente.
+	-- Esto EVITA que el juego intente evaluar la curva de color de Retail/Midnight,
+	-- la cual se bugea con auras secretas y devuelve colores mágicos para debuffs físicos o lockouts.
+	if (dtIsCertain and dt == "none") then
+		return nil
+	end
+
+	-- Si es un debuff mágico/curable, devolvemos su color
+	if (dtIsCertain and isTyped(dt)) then
 		local c = TPerl_GetDebuffTypeColorSafe(dt)
 		if (type(c) == "table") then
 			return { r = c.r, g = c.g, b = c.b, a = c.a }, auraId, spellId, name
 		end
 	end
 
-	-- 3) Midnight/Retail: if the dispel type is hidden/secret, derive the colour via ColorCurve.
-	-- This is what makes "Solo curables" work for ALL dispel-typed debuffs without class gating.
+	-- 4) Midnight/Retail Curve Fallback (Sólo si realmente NO sabemos el tipo)
 	local curveCol = TPerl_GetDispelColourFromCurve(unit, auraData, curve, curableOnly)
 	if (curveCol) then
 		return curveCol, auraId, spellId, name
 	end
 
-	-- 4) Cache by auraInstanceID / spellId (only helps when we can read dt at least once)
-	local auraKey = TPerl_SafeAuraIdKey(auraId)
-	if (not dt and auraKey) then
-		local cdt = TPerl_GetCachedDispelTypeByAuraId(auraKey)
-		local ndt = TPerl_NormalizeDispelType(cdt)
-		if (isTyped(ndt)) then
-			dt = ndt
-		end
-	end
-
-	local spellKey = TPerl_SafeSpellIdKey(spellId)
-	if (not dt and spellKey) then
-		local cdt = TPerl_GetCachedDispelType(spellKey)
-		local ndt = TPerl_NormalizeDispelType(cdt)
-		if (isTyped(ndt)) then
-			dt = ndt
-		end
-	end
-
-	-- 5) Tooltip scan as last resort (safe + cached).
-	-- In Midnight this can be forbidden/blocked; we try it only after curve retrieval fails.
-	if (not dt and unit and auraIndex) then
+	-- 5) Tooltip Fallback como último recurso
+	if (not dtIsCertain and unit and auraIndex) then
 		local dtTT, nameTT = TPerl_GetDispelTypeFromTooltip(unit, auraIndex)
 		local ndt = TPerl_NormalizeDispelType(dtTT)
 		if (isTyped(ndt)) then
-			dt = ndt
-			if (auraKey) then
-				TPerl_SetCachedDispelTypeByAuraId(auraKey, dt)
+			if (auraKey) then TPerl_SetCachedDispelTypeByAuraId(auraKey, ndt) end
+			if (spellKey) then TPerl_SetCachedDispelType(spellKey, ndt, nameTT or name) end
+			
+			local c2 = TPerl_GetDebuffTypeColorSafe(ndt)
+			if (type(c2) == "table") then
+				return { r = c2.r, g = c2.g, b = c2.b, a = c2.a }, auraId, spellId, name
 			end
-			if (spellKey) then
-				TPerl_SetCachedDispelType(spellKey, dt, nameTT or name)
-			end
-		else
-			-- Cache "none" when we can infer it, to avoid repeated scans
-			if (ndt == "none") then
-				if (auraKey) then
-					TPerl_SetCachedDispelTypeByAuraId(auraKey, "none")
-				end
-				if (spellKey) then
-					TPerl_SetCachedDispelType(spellKey, "none", nameTT or name)
-				end
-			end
+		elseif (ndt == "none") then
+			if (auraKey) then TPerl_SetCachedDispelTypeByAuraId(auraKey, "none") end
+			if (spellKey) then TPerl_SetCachedDispelType(spellKey, "none", nameTT or name) end
 		end
 	end
 
-	-- If we still can't confirm it's one of the 4 dispel-typed categories, treat it as non-curable/untyped.
-	if (not dt) then
-		return nil
-	end
-
-	local c2 = TPerl_GetDebuffTypeColorSafe(dt)
-	if (type(c2) == "table") then
-		return { r = c2.r, g = c2.g, b = c2.b, a = c2.a }, auraId, spellId, name
-	end
 	return nil
 end
-
 
 -- Returns: colourTable{r,g,b,a}, auraId, spellId, name
 function TPerl_GetDebuffColorByAuraIndex(unit, index, curableOnly)
@@ -3489,7 +3515,6 @@ function TPerl_CheckDebuffs(self, unit, resetBorders)
 	local high = conf.highlightDebuffs.enable or (self == TPerl_Target and conf.target.highlightDebuffs.enable) or (self == TPerl_Focus and conf.focus.highlightDebuffs.enable)
 
 	if resetBorders or not high or not getShow then
-		-- Reset the frame edges back to normal in case they changed options while debuffed.
 		self.forcedColour = nil
 		bgDef.edgeFile = self.edgeFile or normalEdge
 		bgDef.edgeSize = self.edgeSize or 16
@@ -3497,7 +3522,6 @@ function TPerl_CheckDebuffs(self, unit, resetBorders)
 		bgDef.insets.top = self.edgeInsets or 3
 		bgDef.insets.right = self.edgeInsets or 3
 		bgDef.insets.bottom = self.edgeInsets or 3
-		--for i, f in pairs(self.FlashFrames) do
 		for i = 1, #self.FlashFrames do
 			local f = self.FlashFrames[i]
 			f:SetBackdrop(bgDef)
@@ -3524,8 +3548,13 @@ function TPerl_CheckDebuffs(self, unit, resetBorders)
 	local typedButSecret = false
 	local _, unitClass = UnitClass(unit)
 
-	local curableOnly = (not IsClassic and conf.highlightDebuffs and conf.highlightDebuffs.class) and true or false
-	-- Cache the last typed debuff highlight so it stays stable if dispel type becomes hidden/secret
+	-- LÓGICA CORREGIDA "Solo curables": 
+	-- true (activado) = Todas, false (desactivado) = Solo las que disipea mi clase
+	local curableByMeOnly = false
+	if conf.highlightDebuffs and (not conf.highlightDebuffs.class) then
+		curableByMeOnly = true
+	end
+
 	local lastShow = self._tperlLastDebuffShow
 	local lastNames = self._tperlLastDebuffNames
 	local lastSpellIds = self._tperlLastDebuffSpellIds
@@ -3533,56 +3562,58 @@ function TPerl_CheckDebuffs(self, unit, resetBorders)
 	local lastTS = self._tperlLastDebuffTS
 	local lastPresent = false
 
+	local lastColor = self._tperlLastDebuffColor
+	local lastColorNames = self._tperlLastDebuffColorNames
+	local lastColorSpellIds = self._tperlLastDebuffColorSpellIds
+	local lastColorAuraIds = self._tperlLastDebuffColorAuraIds
+	local lastColorTS = self._tperlLastDebuffColorTS
+	local lastColorPresent = false
 
-local lastColor = self._tperlLastDebuffColor
-local lastColorNames = self._tperlLastDebuffColorNames
-local lastColorSpellIds = self._tperlLastDebuffColorSpellIds
-local lastColorAuraIds = self._tperlLastDebuffColorAuraIds
-local lastColorTS = self._tperlLastDebuffColorTS
-local lastColorPresent = false
+	local secretColor
+	local secretNames
+	local secretSpellIds
+	local secretAuraIds
 
-local secretColor
-local secretNames
-local secretSpellIds
-local secretAuraIds
-
-local typedNames
+	local typedNames
 	local typedSpellIds
 	local typedAuraIds
 
-local useNewAuraScan = (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex)
-for i = 1, 40 do
-	local name, dispelName, spellId, auraId
-	local auraData
+	local useNewAuraScan = (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex)
+	for i = 1, 40 do
+		local name, dispelName, spellId, auraId
+		local auraData
 
-	if useNewAuraScan then
-		local okAD, ad = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, "HARMFUL")
-		if (not okAD or not ad) then
-			break
+		if useNewAuraScan then
+			local okAD, ad = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, "HARMFUL")
+			if (not okAD or not ad) then
+				break
+			end
+			auraData = ad
+			name = TPerl_SafeTableGet(ad, "name")
+			dispelName = TPerl_SafeTableGet(ad, "dispelName")
+			spellId = TPerl_SafeTableGet(ad, "spellId") or TPerl_SafeTableGet(ad, "spellID")
+			auraId = TPerl_SafeTableGet(ad, "auraInstanceID") or TPerl_SafeTableGet(ad, "auraInstanceId")
+		else
+			name, dispelName, spellId, auraId = TPerl_GetHarmfulAura(unit, i)
+			if not name then
+				break
+			end
 		end
-		auraData = ad
-		name = TPerl_SafeTableGet(ad, "name")
-		dispelName = TPerl_SafeTableGet(ad, "dispelName")
-		spellId = TPerl_SafeTableGet(ad, "spellId") or TPerl_SafeTableGet(ad, "spellID")
-		auraId = TPerl_SafeTableGet(ad, "auraInstanceID") or TPerl_SafeTableGet(ad, "auraInstanceId")
-	else
-		name, dispelName, spellId, auraId = TPerl_GetHarmfulAura(unit, i)
-		if not name then
-			break
-		end
-	end
 
-	local blockedAura = false
-	if (curableOnly) then
+		local blockedAura = false
 		if useNewAuraScan and auraData then
 			blockedAura = TPerl_IsSoloCurablesBlockedAura(unit, auraData, i)
+			if curableByMeOnly and not blockedAura then
+				local canDispel = TPerl_SafeCanActivePlayerDispel(auraData)
+				if canDispel == false then
+					blockedAura = true
+				end
+			end
 		else
 			local tsid = TPerl_GetAuraSpellIdFromTooltip(unit, i)
 			blockedAura = TPerl_IsSoloCurablesBlockedSpellId(spellId) or TPerl_IsSoloCurablesBlockedSpellId(tsid)
 		end
-	end
 
-	-- Track if the previously-typed debuff is still present (even if its type becomes hidden later)
 		if lastShow and not blockedAura then
 			if auraId and TPerl_CanAccess(auraId) and lastAuraIds and lastAuraIds[auraId] then
 				lastPresent = true
@@ -3594,203 +3625,153 @@ for i = 1, 40 do
 		end
 
 		if lastColor and not blockedAura then
-	if auraId and TPerl_CanAccess(auraId) and lastColorAuraIds and lastColorAuraIds[auraId] then
-		lastColorPresent = true
-	elseif spellId and TPerl_CanAccess(spellId) and lastColorSpellIds and lastColorSpellIds[spellId] then
-		lastColorPresent = true
-	elseif name and TPerl_CanAccess(name) and lastColorNames and lastColorNames[name] then
-		lastColorPresent = true
-	end
-end
-
-		-- Midnight/Retail: aura fields such as name/dispelName may be "secret".
-		-- Do NOT index tables with secret values. If we can't read the dispel type,
-		-- still track that the unit has a harmful aura so border highlighting can work.
-		local exclude
-		if name and TPerl_CanAccess(name) then
-			exclude = ArcaneExclusions[name]
-		end
-		if not exclude or (type(exclude) == "table" and not exclude[unitClass]) then
-			anyDebuff = true
-
-			if (not blockedAura) then
-				anyRelevantDebuff = true
+			if auraId and TPerl_CanAccess(auraId) and lastColorAuraIds and lastColorAuraIds[auraId] then
+				lastColorPresent = true
+			elseif spellId and TPerl_CanAccess(spellId) and lastColorSpellIds and lastColorSpellIds[spellId] then
+				lastColorPresent = true
+			elseif name and TPerl_CanAccess(name) and lastColorNames and lastColorNames[name] then
+				lastColorPresent = true
 			end
--- Midnight/Retail: dispelType may be a secret object. Convert dispelType -> secret colour via ColorCurve.
-local sCol, sAuraId, sSpellId, sName
-if useNewAuraScan and auraData then
-	sCol, sAuraId, sSpellId, sName = TPerl_GetDebuffColorByAuraData(unit, auraData, nil, curableOnly, i)
-else
-	sCol, sAuraId, sSpellId, sName = TPerl_GetDebuffColorByAuraIndex(unit, i, curableOnly)
-end
-if sCol then
-	if not secretColor then
-		secretColor = sCol
-	end
-	if not secretNames then
-		secretNames = { }
-		secretSpellIds = { }
-		secretAuraIds = { }
-	end
-	if sName and TPerl_CanAccess(sName) then
-		secretNames[sName] = true
-	end
-	if sSpellId and TPerl_CanAccess(sSpellId) then
-		secretSpellIds[sSpellId] = true
-	end
-	if sAuraId and TPerl_CanAccess(sAuraId) then
-		secretAuraIds[sAuraId] = true
-	end
-end
-			if (not blockedAura) and dispelName then
+		end
+
+		local exclude = blockedAura
+		if not exclude and name and TPerl_CanAccess(name) then
+			local ex = ArcaneExclusions and ArcaneExclusions[name]
+			if ex == true or (type(ex) == "table" and ex[unitClass]) then
+				exclude = true
+			end
+		end
+
+		if not exclude then
+			anyDebuff = true
+			anyRelevantDebuff = true
+
+			local sCol, sAuraId, sSpellId, sName
+			if useNewAuraScan and auraData then
+				sCol, sAuraId, sSpellId, sName = TPerl_GetDebuffColorByAuraData(unit, auraData, nil, curableByMeOnly, i)
+			else
+				sCol, sAuraId, sSpellId, sName = TPerl_GetDebuffColorByAuraIndex(unit, i, curableByMeOnly)
+			end
+			if sCol then
+				if not secretColor then
+					secretColor = sCol
+				end
+				if not secretNames then
+					secretNames = { }
+					secretSpellIds = { }
+					secretAuraIds = { }
+				end
+				if sName and TPerl_CanAccess(sName) then secretNames[sName] = true end
+				if sSpellId and TPerl_CanAccess(sSpellId) then secretSpellIds[sSpellId] = true end
+				if sAuraId and TPerl_CanAccess(sAuraId) then secretAuraIds[sAuraId] = true end
+			end
+
+			if dispelName then
 				if TPerl_CanAccess(dispelName) then
 					local dt = TPerl_NormalizeDispelType(dispelName)
 					if (dt) then
 						Curses[dt] = dt
 						debuffCount = debuffCount + 1
 
-						-- Remember typed debuffs we can identify this pass (used for stable caching)
 						if not typedNames then
 							typedNames = { }
 							typedSpellIds = { }
 						end
-						if name and TPerl_CanAccess(name) then
-							typedNames[name] = true
-						end
-						if spellId then
-							typedSpellIds[spellId] = true
-						end
+						if name and TPerl_CanAccess(name) then typedNames[name] = true end
+						if spellId then typedSpellIds[spellId] = true end
 					end
 				else
-					-- Midnight/Retail can hide dispel type as a secret value; remember that a typed debuff exists.
-					if (not blockedAura) then
-						typedButSecret = true
-					end
+					typedButSecret = true
 				end
 			end
 		end
 	end
 
 	if debuffCount > 0 then
-		-- 2.2.6 - Very (very very) slight speed optimization by having a function per class which is set at startup
-		-- Midnight/Retail: the UI option "Solo curables" is interpreted as "only dispel-typed debuffs"
-		-- (Magic/Curse/Poison/Disease), NOT "only what my class can dispel".
-		-- Keep original class-gated behaviour for Classic projects.
-		if (curableOnly) then
-			show = Curses.Magic or Curses.Curse or Curses.Poison or Curses.Disease
-		else
+		if curableByMeOnly then
+			local temp = conf.highlightDebuffs.class
+			conf.highlightDebuffs.class = true
 			show = getShow(Curses)
+			conf.highlightDebuffs.class = temp
+		else
+			show = Curses.Magic or Curses.Curse or Curses.Poison or Curses.Disease
 		end
 
-		-- Cache last typed highlight so it stays stable if the dispel type becomes hidden/secret on later refreshes.
 		if show and show ~= "none" then
 			self._tperlLastDebuffShow = show
 			self._tperlLastDebuffTS = GetTime()
 			self._tperlLastDebuffNames = typedNames
 			self._tperlLastDebuffSpellIds = typedSpellIds
-				self._tperlLastDebuffAuraIds = typedAuraIds
+			self._tperlLastDebuffAuraIds = typedAuraIds
 		end
 	else
-		-- No accessible typed debuffs this pass.
-		-- If we still see the previously typed debuff (by name/spellId), keep the last highlight stable.
-		-- If the type is hidden/secret and we can't verify presence, keep it briefly to avoid flicker.
 		if lastShow and (lastPresent or (typedButSecret and lastTS and (GetTime() - lastTS) < 2)) then
 			show = lastShow
 		else
-			-- If we have debuffs but none are typed (e.g. bleeds), optionally use the generic 'none' colour
-			-- when not restricted to 'only curable by my class'.
 			if anyDebuff and ((not conf.highlightDebuffs) or (not conf.highlightDebuffs.class)) then
 				show = "none"
 			end
-			-- No sign of typed debuffs -> clear cached typed highlight to avoid stale colours.
 			self._tperlLastDebuffShow = nil
 			self._tperlLastDebuffTS = nil
 			self._tperlLastDebuffNames = nil
 			self._tperlLastDebuffSpellIds = nil
-				self._tperlLastDebuffAuraIds = nil
+			self._tperlLastDebuffAuraIds = nil
 		end
 	end
 
 	local hasRelevantDebuff = anyDebuff
-	if (curableOnly) then
+	if (curableByMeOnly) then
 		hasRelevantDebuff = anyRelevantDebuff
 	end
 
--- Secret/forbidden dispelType support via ColorCurve (Midnight/Retail)
--- If we couldn't derive a readable dispel name, try to keep a stable border colour via secret dispelType -> curve.
-if (not show or show == "none") then
-	if secretColor then
-		if lastColor and lastColorPresent then
+	if (not show or show == "none") then
+		if secretColor then
+			if lastColor and lastColorPresent then
+				secretBorderColour = lastColor
+			else
+				secretBorderColour = secretColor
+				self._tperlLastDebuffColor = secretColor
+				self._tperlLastDebuffColorTS = GetTime()
+				self._tperlLastDebuffColorNames = secretNames
+				self._tperlLastDebuffColorSpellIds = secretSpellIds
+				self._tperlLastDebuffColorAuraIds = secretAuraIds
+			end
+		elseif lastColor and (lastColorPresent or (hasRelevantDebuff and lastColorTS and (GetTime() - lastColorTS) < 2)) then
 			secretBorderColour = lastColor
 		else
-			secretBorderColour = secretColor
-			self._tperlLastDebuffColor = secretColor
-			self._tperlLastDebuffColorTS = GetTime()
-			self._tperlLastDebuffColorNames = secretNames
-			self._tperlLastDebuffColorSpellIds = secretSpellIds
-			self._tperlLastDebuffColorAuraIds = secretAuraIds
+			self._tperlLastDebuffColor = nil
+			self._tperlLastDebuffColorTS = nil
+			self._tperlLastDebuffColorNames = nil
+			self._tperlLastDebuffColorSpellIds = nil
+			self._tperlLastDebuffColorAuraIds = nil
 		end
-	elseif lastColor and (lastColorPresent or (hasRelevantDebuff and lastColorTS and (GetTime() - lastColorTS) < 2)) then
-		-- Keep briefly to avoid flicker if dispelType becomes hidden intermittently.
-		secretBorderColour = lastColor
-	else
-		-- Clear stale secret colour cache.
+	end
+
+	if not anyDebuff then
+		self._tperlLastDebuffShow = nil
+		self._tperlLastDebuffTS = nil
+		self._tperlLastDebuffNames = nil
+		self._tperlLastDebuffSpellIds = nil
+		self._tperlLastDebuffAuraIds = nil
 		self._tperlLastDebuffColor = nil
 		self._tperlLastDebuffColorTS = nil
 		self._tperlLastDebuffColorNames = nil
 		self._tperlLastDebuffColorSpellIds = nil
 		self._tperlLastDebuffColorAuraIds = nil
 	end
-end
-	-- No debuffs at all -> clear cache
-	if not anyDebuff then
-		self._tperlLastDebuffShow = nil
-		self._tperlLastDebuffTS = nil
-		self._tperlLastDebuffNames = nil
-		self._tperlLastDebuffSpellIds = nil
-				self._tperlLastDebuffAuraIds = nil
 
-self._tperlLastDebuffColor = nil
-self._tperlLastDebuffColorTS = nil
-self._tperlLastDebuffColorNames = nil
-self._tperlLastDebuffColorSpellIds = nil
-self._tperlLastDebuffColorAuraIds = nil
-	end
-
-
-	
-
-local colour, borderColour
-if secretBorderColour then
-	-- Secret dispelType -> curve colour (Midnight/Retail)
-	if conf.highlightDebuffs.frame then
-		colour = secretBorderColour
+	local colour, borderColour
+	if secretBorderColour then
+		if conf.highlightDebuffs.frame then colour = secretBorderColour else colour = conf.colour.frame end
+		if conf.highlightDebuffs.border then borderColour = secretBorderColour else borderColour = conf.colour.border end
+	elseif show then
+		colour = TPerl_GetDebuffTypeColorSafe(show)
+		if conf.highlightDebuffs.border then borderColour = colour else borderColour = conf.colour.border end
 	else
 		colour = conf.colour.frame
-	end
-	if conf.highlightDebuffs.border then
-		borderColour = secretBorderColour
-	else
 		borderColour = conf.colour.border
 	end
-elseif show then
-	colour = TPerl_GetDebuffTypeColorSafe(show)
-	if conf.highlightDebuffs.border then
-		borderColour = colour
-	else
-		borderColour = conf.colour.border
-	end
-else
-	colour = conf.colour.frame
-	borderColour = conf.colour.border
-end
 
-
-	-- IMPORTANT:
-	-- When highlighting *only the border*, combat-flash can overwrite the border colour and
-	-- then restore it to the default border colour when the flash ends.
-	-- To keep the debuff border highlight stable, ensure we set forcedColour whenever the
-	-- border highlight is active.
 	if (show or secretBorderColour) and conf.highlightDebuffs.border then
 		self.forcedColour = borderColour
 	else
@@ -3800,8 +3781,6 @@ end
 	if (show or secretBorderColour) and conf.highlightDebuffs.frame then
 		bgDef.edgeFile = curseEdge
 	else
-		--bgDef.edgeFile = normalEdge
-
 		bgDef.edgeFile = self.edgeFile or normalEdge
 		bgDef.edgeSize = self.edgeSize or 16
 		bgDef.insets.left = self.edgeInsets or 3
@@ -3810,7 +3789,6 @@ end
 		bgDef.insets.bottom = self.edgeInsets or 3
 	end
 
-	--for i, f in pairs(self.FlashFrames) do
 	for i = 1, #self.FlashFrames do
 		local f = self.FlashFrames[i]
 		if not conf.highlightDebuffs.frame then
