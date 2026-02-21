@@ -1,0 +1,563 @@
+-- TPerl UnitFrames
+-- Author: TULOA
+-- License: GNU GPL v3, 29 June 2007 (see LICENSE.txt)
+
+local conf, pconf
+TPerl_RequestConfig(function(new)
+	conf = new
+	pconf = new.player
+end, "$Revision:  $")
+
+--local playerClass
+
+--[===[@debug@
+local function d(fmt, ...)
+	fmt = fmt:gsub("(%%[sdqxf])", "|cFF60FF60%1|r")
+	ChatFrame1:AddMessage("|cFFFF8080PlayerBuffs:|r "..format(fmt, ...), 0.8, 0.8, 0.8)
+end
+--@end-debug@]===]
+
+local IsRetail = WOW_PROJECT_ID == WOW_PROJECT_MAINLINE
+local IsTBCAnni = WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC
+local IsClassic = WOW_PROJECT_ID >= WOW_PROJECT_CLASSIC
+local IsVanillaClassic = WOW_PROJECT_ID == WOW_PROJECT_CLASSIC
+local IsVanillaClassic = WOW_PROJECT_ID == WOW_PROJECT_CLASSIC
+
+-- Midnight "secret value" helpers (local to this module)
+local canaccessvalue = canaccessvalue
+local issecretvalue = issecretvalue
+
+local function TPerl_PB_CanAccess(v)
+	if v == nil then
+		return false
+	end
+	if canaccessvalue then
+		local ok, res = pcall(canaccessvalue, v)
+		return ok and res or false
+	end
+	if issecretvalue then
+		local ok, res = pcall(issecretvalue, v)
+		return ok and (not res) or true
+	end
+	return v ~= nil
+end
+
+local function TPerl_PB_SafeToString(v)
+	if v == nil then
+		return nil
+	end
+	local ok, s = pcall(tostring, v)
+	if ok then
+		return s
+	end
+	return nil
+end
+
+-- setCommon
+local function setCommon(self, filter, buffTemplate)
+	self:SetAttribute("template", buffTemplate)
+	self:SetAttribute("weaponTemplate", buffTemplate)
+	self:SetAttribute("useparent-unit", true)
+
+	self:SetAttribute("filter", filter)
+	self:SetAttribute("separateOwn", 1)
+	if (filter == "HELPFUL") then
+		self:SetAttribute("includeWeapons", 1)
+	end
+	self:SetAttribute("point", pconf.buffs.above and "BOTTOMLEFT" or "TOPLEFT")
+	if (pconf.buffs.wrap) then
+		self:SetAttribute("wrapAfter", max(1, floor(TPerl_Player:GetWidth() / pconf.buffs.size)))	-- / TPerl_Player:GetEffectiveScale()
+	else
+		self:SetAttribute("wrapAfter", 0)
+	end
+	self:SetAttribute("maxWraps", pconf.buffs.rows)
+	self:SetAttribute("xOffset", 32)	-- pconf.buffs.size)
+	self:SetAttribute("yOffset", 0)
+	self:SetAttribute("wrapXOffset", 0)
+	self:SetAttribute("wrapYOffset", pconf.buffs.above and 32 or -32)
+
+	self:SetAttribute("minWidth", 32)
+	self:SetAttribute("minHeight", 32)
+
+	self:SetAttribute("initial-width", pconf.buffs.size)
+	self:SetAttribute("initial-height", pconf.buffs.size)
+	-- Workaround: We can't set the initial-width/height (beacuse the api ignores this so far)
+	-- So, we'll scale the parent frame so the effective size matches our setting
+
+	if (filter == "HELPFUL" and pconf.buffs) then
+		local needScale = pconf.buffs.size / 32
+		self:SetScale(needScale)
+	elseif (pconf.debuffs) then
+		local needScale = pconf.debuffs.size / pconf.buffs.size
+		self:SetScale(needScale)
+	end
+end
+
+-- TPerl_Player_Buffs_Position
+function TPerl_Player_Buffs_Position(self)
+	if (self.buffFrame and not InCombatLockdown()) then
+		self.buffFrame:ClearAllPoints()
+		self.debuffFrame:ClearAllPoints()
+
+		if (pconf.buffs.above) then
+			self.buffFrame:SetPoint("BOTTOMLEFT", self, "TOPLEFT", 3, 0)
+		else
+			--[[if (self.runes and self.runes:IsShown() and ((self.runes.child and self.runes.child:IsShown()) or (self.runes.child2 and self.runes.child2:IsShown())) and pconf.dockRunes) then
+				self.buffFrame:SetPoint("TOPLEFT", self.portraitFrame, "BOTTOMLEFT", 3, -28)
+			elseif ((pconf.xpBar or pconf.repBar) and not pconf.extendPortrait) then
+				local diff = self.statsFrame:GetBottom() - self.portraitFrame:GetBottom()
+				self.buffFrame:SetPoint("TOPLEFT", self.portraitFrame, "BOTTOMLEFT", 3, diff - 5)
+			else
+				self.buffFrame:SetPoint("TOPLEFT", self.portraitFrame, "BOTTOMLEFT", 3, 0)
+			end]]
+
+			local _, playerClass = UnitClass("player")
+			-- Be EXTRA positive
+			playerClass = playerClass and strupper(playerClass) or ""
+			local extraBar
+
+			-- In Midnight, some APIs may return nil/forbidden values at odd times (eg. during option updates).
+			-- Make UnitPowerType/spec/form checks nil-safe to avoid compare-with-nil errors.
+			local powerType = 0
+			do
+				local ok, pt = pcall(UnitPowerType, self.partyid)
+				if ok and type(pt) == "number" then
+					powerType = pt
+				end
+			end
+			local spec = 0
+			do
+				local ok, s = pcall(GetSpecialization)
+				if ok and type(s) == "number" then
+					spec = s
+				end
+			end
+			local form = 0
+			do
+				local ok, f = pcall(GetShapeshiftForm)
+				if ok and type(f) == "number" then
+					form = f
+				end
+			end
+
+			if (playerClass == "DRUID" and powerType > 0 and not pconf.noDruidBar) or (playerClass == "SHAMAN" and not IsClassic and spec == 1 and form == 0 and not pconf.noDruidBar) or (playerClass == "PRIEST" and powerType > 0 and not pconf.noDruidBar) or (playerClass == "DEATHKNIGHT") then
+				extraBar = 1
+			else
+				extraBar = 0
+			end
+
+			local offset = ((extraBar + (pconf.repBar and 1 or 0) + (pconf.xpBar and 1 or 0)) * 13.5)
+
+			if pconf.dockRunes and (not IsTBCAnni) then
+				if pconf.extendPortrait then
+					self.buffFrame:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 5, 0 - 28)
+				else
+					self.buffFrame:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 5, 0 - offset - 28)
+				end
+			else
+				if pconf.extendPortrait then
+					self.buffFrame:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 5, 0)
+				else
+					self.buffFrame:SetPoint("TOPLEFT", self, "BOTTOMLEFT", 5, 0 - offset)
+				end
+			end
+		end
+
+		if (pconf.buffs.above) and (not IsTBCAnni) then
+			self.debuffFrame:SetPoint("BOTTOMLEFT", self.buffFrame, "TOPLEFT", 0, 2)
+		else
+			self.debuffFrame:SetPoint("TOPLEFT", self.buffFrame, "BOTTOMLEFT", 0, -2)
+		end
+
+		TPerl_Unit_BuffPositions(self, self.buffFrame.buff, self.buffFrame.debuff, pconf.buffs.size, pconf.debuffs.size)
+	end
+end
+
+-- TPerl_Player_BuffSetup
+function TPerl_Player_BuffSetup(self)
+ --print("Started TPerl_Player_BuffSetup")
+	if (not self) then
+		return
+	end
+
+	if (InCombatLockdown()) then
+		TPerl_OutOfCombatQueue[TPerl_Player_BuffSetup] = self
+		return
+	end
+
+	if (not self.buffFrame) then
+		self.buffFrame = CreateFrame("Frame", self:GetName().."buffFrame", self, "SecureAuraHeaderTemplate")
+		self.debuffFrame = CreateFrame("Frame", self:GetName().."debuffFrame", self.buffFrame, "SecureAuraHeaderTemplate")
+  if IsRetail then
+			if not InCombatLockdown() then
+				self:RegisterForClicks("RightButtonDown", "RightButtonUp")
+			end
+		else
+			if not InCombatLockdown() then
+				self:RegisterForClicks("RightButtonUp")
+			end
+		end
+
+		--self.buffFrame:SetAttribute("frameStrata", "DIALOG")
+
+		self.buffFrame.BuffFrameUpdateTime = 0
+		self.buffFrame.BuffFrameFlashTime = 0
+		self.buffFrame.BuffFrameFlashState = 1
+		self.buffFrame.BuffAlphaValue = 1
+		--self.buffFrame:SetScript("OnUpdate", BuffFrame_OnUpdate)
+
+		-- Not implemented.. yet.. maybe later
+		--self.buffFrame.initialConfigFunction = function(self)
+		--	d("initialConfigFunction(%s)", tostring(self))
+		--	self:SetAttribute("useparent-unit", true)
+		--end
+		--self.debuffFrame.initialConfigFunction = self.buffFrame.initialConfigFunction
+	end
+
+	if (self.buffFrame) then
+		if pconf.buffs.enable then
+			setCommon(self.buffFrame, "HELPFUL", "TPerl_Secure_BuffTemplate")
+			self.buffFrame:Show()
+		else
+			self.buffFrame:Hide()
+		end
+	end
+
+	if (self.debuffFrame) then
+		if pconf.buffs.enable and pconf.debuffs.enable then
+			setCommon(self.debuffFrame, "HARMFUL", "TPerl_Secure_BuffTemplate")
+			self.debuffFrame:Show()
+		else
+			self.debuffFrame:Hide()
+		end
+	end
+
+	TPerl_Player_Buffs_Position(self)
+
+	if (not pconf.buffs.enable) then
+		if (self.buffFrame) then
+			self.buffFrame:Hide()
+			self.debuffFrame:Hide()
+		end
+	end
+
+	if (pconf.buffs.hideBlizzard) then
+		BuffFrame:UnregisterEvent("UNIT_AURA")
+		BuffFrame:Hide()
+		if (not IsRetail) and (not IsTBCAnni) then
+			TemporaryEnchantFrame:Hide()
+		end
+	else
+		BuffFrame:Show()
+		BuffFrame:RegisterEvent("UNIT_AURA")
+		if not IsRetail and (not IsTBCAnni) then
+			TemporaryEnchantFrame:Show()
+		end
+	end
+	--print("Leaving TPerl_Player_BuffSetup")
+end
+
+local function TPerl_Player_Buffs_Set_Bits(self)
+ --print("TPerl_PlayerBuffs.lua:204")
+	--print("Starting TPerl_Player_Buffs_Set_Bits")
+	if (InCombatLockdown()) then
+		TPerl_OutOfCombatQueue[TPerl_Player_Buffs_Set_Bits] = self
+		return
+	end
+
+	--local _, class = UnitClass("player")
+	--playerClass = class
+
+	TPerl_Player_BuffSetup(self)
+
+	self.state:SetFrameRef("TPerlPlayerBuffs", self.buffFrame)
+	self.state:SetAttribute("buffsAbove", pconf.buffs.above)
+
+	local buffs = self.buffFrame
+	if buffs then
+		if pconf.buffs.enable then
+			setCommon(buffs, "HELPFUL", "TPerl_Secure_BuffTemplate")
+			buffs:Show()
+		else
+			buffs:Hide()
+		end
+	end
+
+	local debuffs = self.debuffFrame
+	if debuffs then
+		if pconf.buffs.enable and pconf.debuffs.enable then
+			setCommon(debuffs, "HARMFUL", "TPerl_Secure_BuffTemplate")
+			debuffs:Show()
+		else
+			debuffs:Hide()
+		end
+	end
+
+	TPerl_Player_Buffs_Position(self)
+	--print("Leaving TPerl_Player_Buffs_Set_Bits")
+end
+
+-- AuraButton_OnUpdate
+--[[local function AuraButton_OnUpdate(self, elapsed)
+	if (not self.endTime) then
+		self:SetAlpha(1)
+		self:SetScript("OnUpdate", nil)
+		return
+	end
+	local timeLeft = self.endTime - GetTime()
+	if (timeLeft < _G.BUFF_WARNING_TIME) then
+		self:SetAlpha(TPerl_Player.buffFrame.BuffAlphaValue)
+	else
+		self:SetAlpha(1)
+	end
+end--]]
+
+local function DoEnchant(self, slotID, hasEnchant, expire, charges)
+	if (hasEnchant) then
+		-- Fix to check to see if the player is a shaman and sets the fullDuration to 30 minutes. Shaman weapon enchants are only 30 minutes.
+		--[[if (playerClass == "SHAMAN") then
+			if ((expire / 1000) > 30 * 60) then
+				self.fullDuration = 60 * 60
+			else
+				self.fullDuration = 30 * 60
+			end
+		end]]
+		if (not self.fullDuration) then
+			self.fullDuration = expire - GetTime()
+			if (self.fullDuration > 1 * 60) then
+				self.fullDuration = 10 * 60
+			end
+		end
+
+		--self:Show()
+
+		local textureName = GetInventoryItemTexture("player", slotID) -- Weapon Icon
+		self.icon:SetTexture(textureName)
+		self:SetAlpha(1)
+		self.border:SetVertexColor(0.7, 0, 0.7)
+
+		-- Handle cooldowns
+		if (self.cooldown and expire and conf.buffs.cooldown and pconf.buffs.cooldown) then
+			local timeEnd = GetTime() + (expire / 1000)
+			local timeStart = timeEnd - self.fullDuration --(30 * 60)
+			TPerl_CooldownFrame_SetTimer(self.cooldown, timeStart, self.fullDuration, 1)
+
+			--[[if (pconf.buffs.flash) then
+				self.endTime = timeEnd
+				self:SetScript("OnUpdate", AuraButton_OnUpdate)
+			else
+				self.endTime = nil
+			end--]]
+		else
+			self.cooldown:Hide()
+			--self.endTime = nil
+		end
+	else
+		self.fullDuration = nil
+		if not InCombatLockdown() then
+			self:Hide()
+		end
+	end
+end
+
+--local function setupButton(self)
+--end
+
+function TPerl_PlayerBuffs_Show(self)
+	self:RegisterEvent("UNIT_AURA")
+	--self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+	TPerl_PlayerBuffs_Update(self)
+end
+
+function TPerl_PlayerBuffs_Hide(self)
+	self:UnregisterEvent("UNIT_AURA")
+	--self:UnregisterEvent("PLAYER_EQUIPMENT_CHANGED")
+	TPerl_PlayerBuffs_Update(self)
+end
+
+function TPerl_PlayerBuffs_OnEvent(self, event, ...)
+	if (event == "UNIT_AURA") then
+		local unit = ...
+		if (unit == "player" or unit == "pet" or unit == "vehicle") then
+			TPerl_PlayerBuffs_Update(self)
+		end
+	elseif (event == "PLAYER_REGEN_ENABLED") then
+		-- Ensure cancel-aura secure attributes are set after combat lockdown ends.
+		pcall(self.RegisterForClicks, self, "RightButtonDown", "RightButtonUp")
+		pcall(self.SetAttribute, self, "type2", "cancelaura")
+		pcall(self.SetAttribute, self, "useparent-unit", true)
+		self:UnregisterEvent("PLAYER_REGEN_ENABLED")
+	--[[elseif (event == "PLAYER_EQUIPMENT_CHANGED") then
+		local slot, hasItem = ...
+		if (slot == 16 or slot == 17) then
+			TPerl_PlayerBuffs_Update(self)
+		end]]
+	end
+end
+
+function TPerl_PlayerBuffs_OnAttrChanged(self, attr, value)
+	if (attr == "index") then
+		-- SecureAuraHeader may provide the aura index via an attribute; mirror it to the button ID
+		-- so secure cancel-aura logic that relies on GetID() continues to work.
+		local n = tonumber(value)
+		if n and n > 0 then
+			pcall(self.SetID, self, n)
+		end
+	end
+	if (attr == "index" or attr == "filter" or attr == "target-slot") then
+		TPerl_PlayerBuffs_Update(self)
+	end
+end
+
+function TPerl_PlayerBuffs_OnEnter(self)
+	if (conf.tooltip.enableBuffs and TPerl_TooltipModiferPressed(true)) then
+		if (not conf.tooltip.hideInCombat or not InCombatLockdown()) then
+			GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT", 0, 0)
+
+			local slot = self:GetAttribute("target-slot")
+			if (slot) then
+				GameTooltip:SetInventoryItem("player", slot)
+			else
+				local partyid = SecureButton_GetUnit(self:GetParent()) or "player"
+				if (self:GetAttribute("filter") == "HELPFUL") then
+					TPerl_TooltipSetUnitBuff(GameTooltip, partyid, self:GetID(), "HELPFUL")
+				else
+					TPerl_TooltipSetUnitDebuff(GameTooltip, partyid, self:GetID(), "HARMFUL")
+				end
+				self.UpdateTooltip = TPerl_PlayerBuffs_OnEnter
+			end
+		end
+	end
+end
+
+function TPerl_PlayerBuffs_OnLeave(self)
+	GameTooltip:Hide()
+end
+
+function TPerl_PlayerBuffs_Update(self)
+	local slot = self:GetAttribute("target-slot")
+	if slot then
+		-- Weapon Enchant
+		local hasMainHandEnchant, mainHandExpiration, mainHandCharges, mainHandEnchantID, hasOffHandEnchant, offHandExpiration, offHandCharges, offHandEnchantId = GetWeaponEnchantInfo()
+		if slot == 16 then
+			DoEnchant(self, 16, hasMainHandEnchant, mainHandExpiration, mainHandCharges)
+		else
+			DoEnchant(self, 17, hasOffHandEnchant, offHandExpiration, offHandCharges)
+		end
+	else
+		-- Aura
+		local index = self:GetAttribute("index")
+		local filter = self:GetAttribute("filter")
+		local unit = SecureButton_GetUnit(self:GetParent()) or "player"
+
+		if filter and unit then
+			local name, icon, applications, dispelName, duration, expirationTime, sourceUnit
+			if not IsVanillaClassic and C_UnitAuras then
+				local auraData = TPerl_SafeGetAuraDataByIndex(unit, index, filter)
+				if auraData then
+					name = auraData.name
+					icon = auraData.icon
+					applications = auraData.applications
+					dispelName = auraData.dispelName
+					duration = auraData.duration
+					expirationTime = auraData.expirationTime
+					sourceUnit = auraData.sourceUnit
+				end
+			else
+				name, icon, applications, dispelName, duration, expirationTime, sourceUnit = UnitAura(unit, index, filter)
+			end
+			self.filter = filter
+			self:SetAlpha(1)
+
+				if name and filter == "HARMFUL" then
+				self.border:Show()
+					-- Midnight/Retail: dispelName may be secret; never use it directly as a table key.
+					local dtype = (dispelName and TPerl_PB_CanAccess(dispelName) and dispelName) or "none"
+					local borderColor = DebuffTypeColor[dtype]
+				self.border:SetVertexColor(borderColor.r, borderColor.g, borderColor.b)
+			else
+				self.border:Hide()
+			end
+
+			self.icon:SetTexture(icon)
+			-- Midnight/Retail: applications (stack count) may be a secret number.
+			-- Never compare secret numbers; try numeric compare when accessible, otherwise fall back to string check.
+			do
+				local showCount = false
+				local appsText
+				if (applications ~= nil) then
+					if (type(applications) == "number" and TPerl_PB_CanAccess(applications)) then
+						showCount = (applications > 1)
+						appsText = tostring(applications)
+					else
+						appsText = TPerl_PB_SafeToString(applications)
+							-- Midnight/Retail: appsText itself can be a secret string.
+							-- Never compare secret strings; only compare when accessible.
+							if (appsText and TPerl_PB_CanAccess(appsText)) then
+								-- Only show when it's not "1" or "0".
+								if (appsText ~= "" and appsText ~= "1" and appsText ~= "0") then
+									showCount = true
+								end
+							else
+								appsText = nil
+							end
+					end
+				end
+				if showCount and appsText then
+					self.count:SetText(appsText)
+					self.count:Show()
+				else
+					self.count:Hide()
+				end
+			end
+
+			-- Handle cooldowns
+			-- Midnight/Retail: duration/expirationTime may be secret numbers; only do math when both are accessible.
+			local durationOK = (duration ~= nil and type(duration) == "number" and TPerl_PB_CanAccess(duration) and duration ~= 0)
+			local expOK = (expirationTime ~= nil and type(expirationTime) == "number" and TPerl_PB_CanAccess(expirationTime))
+			if self.cooldown and durationOK and expOK and conf.buffs.cooldown and (sourceUnit or conf.buffs.cooldownAny) then
+				local start = expirationTime - duration
+				TPerl_CooldownFrame_SetTimer(self.cooldown, start, duration, 1, sourceUnit)
+				--[[if (pconf.buffs.flash) then
+					self.endTime = expirationTime
+					self:SetScript("OnUpdate", AuraButton_OnUpdate)
+				else
+					self.endTime = nil
+				end--]]
+			else
+				self.cooldown:Hide()
+				--self.endTime = nil
+			end
+			-- TODO: Variable this
+			self.cooldown:SetDrawEdge(false)
+			self.cooldown:SetDrawBling(false)
+			-- Blizzard Cooldown Text Support
+			if not conf.buffs.blizzard then
+				self.cooldown:SetHideCountdownNumbers(true)
+			else
+				self.cooldown:SetHideCountdownNumbers(false)
+			end
+			-- OmniCC Support
+			if not conf.buffs.omnicc then
+				self.cooldown.noCooldownCount = true
+			else
+				self.cooldown.noCooldownCount = nil
+			end
+		end
+	end
+end
+
+function TPerl_PlayerBuffs_OnLoad(self)
+	TPerl_SetChildMembers(self)
+	-- Ensure right-click cancel works reliably on SecureAuraHeader children.
+	-- Some clients require RightButtonDown registration and the button must resolve the unit via parent.
+	local ok1 = pcall(self.RegisterForClicks, self, "RightButtonDown", "RightButtonUp")
+	local ok2 = pcall(self.SetAttribute, self, "type2", "cancelaura")
+	local ok3 = pcall(self.SetAttribute, self, "useparent-unit", true)
+	if (not ok1 or not ok2 or not ok3) then
+		self:RegisterEvent("PLAYER_REGEN_ENABLED")
+	end
+end
+
+
+TPerl_RegisterOptionChanger(TPerl_Player_Buffs_Set_Bits, TPerl_Player, "TPerl_Player_Buffs_Set_Bits")
